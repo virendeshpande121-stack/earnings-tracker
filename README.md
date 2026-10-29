@@ -2,6 +2,15 @@
 
 A local dashboard that tracks the status of quarterly results for the Nifty 500 and your watchlist. It pulls live data from NSE and BSE.
 
+## Hosted copy (shareable link)
+**https://virendeshpande121-stack.github.io/earnings-tracker/**
+
+- **How it updates:** GitHub Actions (`.github/workflows/publish.yml`) runs one cycle and republishes the page. That's every 5 minutes from 06:30 to 01:30 IST and every 30 minutes overnight. GitHub can delay scheduled runs.
+- **NSE only:** BSE blocks GitHub's servers. The hosted page therefore has no BSE links or codes, shows free-float Mcap, and uses NSE timestamps. Run the Mac app for the full NSE + BSE view.
+- **Read-only:** to change the hosted watchlist, edit `hosted_watchlist.txt` on GitHub and commit.
+- **Run now:** on the repo, go to **Actions → Publish dashboard → Run workflow**.
+- **60-day rule:** GitHub pauses scheduled workflows after 60 days without commits. Re-enable it from the Actions tab.
+
 ## Get it on another Mac
 The app runs on each user's own Mac, because it pulls from NSE/BSE directly. GitHub only hosts the code.
 1. On the repo page, click **Code → Download ZIP** and unzip it, or run `git clone https://github.com/virendeshpande121-stack/earnings-tracker.git`.
