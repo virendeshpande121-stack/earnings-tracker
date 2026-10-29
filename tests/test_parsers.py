@@ -198,6 +198,32 @@ class EdgeCases(unittest.TestCase):
                               {"INE1": {"date": "2026-11-07", "src": "NSE", "prev_date": None}})
         self.assertEqual(m2["INE1"]["prev_date"], "2026-11-07")
 
+    def test_presentation_links(self):
+        self.assertTrue(et.is_presentation_nse(nse_item(
+            "Investor Presentation", "ABC Limited has informed the Exchange about Investor Presentation"), QEND))
+        self.assertFalse(et.classify_nse(nse_item(
+            "Investor Presentation", "ABC Limited has informed the Exchange about Investor Presentation"), QEND))
+        self.assertFalse(et.is_presentation_bse(bse_item(
+            "Company Update", "Analyst / Investor Meet - Intimation",
+            "ABC Ltd - Intimation of schedule of investor presentation"), QEND))
+        self.assertTrue(et.is_presentation_bse(bse_item(
+            "Result", "Financial Results",
+            "ABC Ltd - Earnings Presentation W.R.T Un-Audited Financial Results For The Quarter Ended 30-09-2026"), QEND))
+        decks = {}
+        et.merge_deck(decks, "I", et.parse_nse_dt("28-Oct-2026 16:00:00"), "NSE", "a.pdf", "v1")
+        et.merge_deck(decks, "I", et.parse_nse_dt("28-Oct-2026 18:00:00"), "NSE", "b.pdf", "revised")
+        et.merge_deck(decks, "I", et.parse_nse_dt("28-Oct-2026 17:00:00"), "BSE", "c.pdf", "dup")
+        self.assertEqual(decks["I"]["link"], "b.pdf")
+
+    def test_pdf_beats_xbrl(self):
+        decl = {}
+        ts = et.parse_nse_dt("28-Oct-2026 20:00:00")
+        et.merge_declaration(decl, "I", ts, "NSE", "https://x/ixbrl/abc_WEB.html", "register")
+        et.merge_declaration(decl, "I", et.parse_nse_dt("28-Oct-2026 15:00:00"), "NSE", "https://x/abc.pdf", "ann")
+        self.assertEqual(decl["I"]["nse"], "https://x/abc.pdf")
+        et.merge_declaration(decl, "I", ts, "NSE", "https://x/ixbrl/other.html", "register")
+        self.assertEqual(decl["I"]["nse"], "https://x/abc.pdf")
+
     def test_status(self):
         t = date(2026, 10, 28)
         meet = {"A": {"date": "2026-10-28"}, "B": {"date": "2026-11-02"}, "C": {"date": "2026-10-20"},

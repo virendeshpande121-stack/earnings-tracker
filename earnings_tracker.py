@@ -221,6 +221,29 @@ def classify_bse(item: dict, qend: date) -> bool:
     return False
 
 
+DECK_EXCLUDE = re.compile(r"intimation|schedule|will\s+be|audio|video|transcript|recording", re.I)
+
+
+def is_presentation_nse(item: dict, qend: date) -> bool:
+    desc = (item.get("desc") or "").strip().lower()
+    return desc.startswith("investor presentation") and not wrong_period(item.get("attchmntText") or "", qend)
+
+
+def is_presentation_bse(item: dict, qend: date) -> bool:
+    text = "%s %s" % (item.get("NEWSSUB") or "", item.get("HEADLINE") or "")
+    return ("presentation" in text.lower() and not DECK_EXCLUDE.search(text)
+            and not wrong_period(text, qend))
+
+
+def merge_deck(decks: dict, isin: str, ts: datetime, src: str, link: str | None, title: str) -> None:
+    """Keep the most recent investor presentation of the season (a revised deck replaces the first)."""
+    if not link:
+        return
+    cur = decks.get(isin)
+    if cur is None or ts > from_iso(cur["ts"]):
+        decks[isin] = {"ts": iso(ts), "src": src, "link": link, "title": (title or "")[:200]}
+
+
 def nse_ann_time(item: dict) -> datetime | None:
     return parse_nse_dt(item.get("sort_date")) or parse_nse_dt(item.get("an_dt"))
 
@@ -287,8 +310,8 @@ def merge_declaration(declared: dict, isin: str, ts: datetime, src: str, link: s
         d[k] = link
         d[k + "_ts"] = iso(ts)
         return True
-    if link and not d.get(k):
-        d[k] = link
+    if link and (not d.get(k) or (is_pdf(link) and not is_pdf(d[k]))):
+        d[k] = link   # an announcement PDF beats the register's iXBRL page
     cur_k = from_iso(d.get(k + "_ts"))
     if cur_k is None or ts < cur_k:
         d[k + "_ts"] = iso(ts)
@@ -300,6 +323,10 @@ def merge_declaration(declared: dict, isin: str, ts: datetime, src: str, link: s
     if detail:
         d["detail"] = detail
     return False
+
+
+def is_pdf(url) -> bool:
+    return bool(url) and url.lower().split("?")[0].endswith(".pdf")
 
 
 def status_for(isin: str, meetings: dict, declared: dict, today: date) -> str:
@@ -472,7 +499,7 @@ class Tracker:
     # ---- state
     def _fresh_state(self):
         return {"quarter": self.q["label"], "qend": self.q["qend"].isoformat(), "meetings": {}, "declared": {},
-                "feed": [], "backfill_done": False, "backfill_cursor": None}
+                "feed": [], "backfill_done": False, "backfill_cursor": None, "decks": {}}
 
     def _load_state(self):
         st = load_json(self.state_path, None)
@@ -638,12 +665,16 @@ class Tracker:
         tracked = self.tracked()
         new = []
         for it in items:
-            if not classify_nse(it, qend):
+            result, deck = classify_nse(it, qend), is_presentation_nse(it, qend)
+            if not result and not deck:
                 continue
             # sm_isin is stale for companies that changed ISIN (e.g. after a split), so prefer the symbol.
             isin = self.sym2isin.get((it.get("symbol") or "").upper()) or (it.get("sm_isin") or "").strip()
             ts = nse_ann_time(it)
             if not isin or isin not in tracked or not ts or ts < start:
+                continue
+            if deck:
+                merge_deck(self.state["decks"], isin, ts, "NSE", it.get("attchmntFile"), it.get("attchmntText"))
                 continue
             if merge_declaration(self.state["declared"], isin, ts, "NSE", it.get("attchmntFile"),
                                  it.get("attchmntText") or it.get("desc") or ""):
@@ -656,11 +687,15 @@ class Tracker:
         tracked = self.tracked()
         new = []
         for it in items:
-            if not classify_bse(it, qend):
+            result, deck = classify_bse(it, qend), is_presentation_bse(it, qend)
+            if not result and not deck:
                 continue
             isin = self.code2isin.get(str(it.get("SCRIP_CD") or "").strip())
             ts = bse_ann_time(it)
             if not isin or isin not in tracked or not ts or ts < start:
+                continue
+            if deck:
+                merge_deck(self.state["decks"], isin, ts, "BSE", bse_link(it), it.get("NEWSSUB"))
                 continue
             if merge_declaration(self.state["declared"], isin, ts, "BSE", bse_link(it),
                                  it.get("NEWSSUB") or it.get("HEADLINE") or ""):
@@ -741,10 +776,11 @@ class Tracker:
         return new
 
     def nse_backfill_step(self, max_days=7):
-        """NSE-only builds lack BSE's early timestamps, so walk the season's NSE announcements once."""
+        """Walk the season's NSE announcements once: investor presentations, and early timestamps
+        for NSE-only builds (which lack BSE)."""
         st = self.state
         today = now_ist().date()
-        cur = date.fromisoformat(st["nse_backfill_cursor"]) if st.get("nse_backfill_cursor") else self.q["season_start"]
+        cur = date.fromisoformat(st["nse_bf2_cursor"]) if st.get("nse_bf2_cursor") else self.q["season_start"]
         new, n = [], 0
         for _ in range(max_days):
             if cur >= today:   # today itself is covered by the fast loop
@@ -756,10 +792,10 @@ class Tracker:
             with self.lock:
                 new += self._register_nse(items or [], "nse_backfill")
                 cur += timedelta(days=1)
-                st["nse_backfill_cursor"] = cur.isoformat()
+                st["nse_bf2_cursor"] = cur.isoformat()
         with self.lock:
-            st["nse_backfill_done"] = cur >= today
-        self._ok("nse_backfill", n, "done" if st["nse_backfill_done"] else "through %s" % cur.isoformat())
+            st["nse_bf2_done"] = cur >= today
+        self._ok("nse_backfill", n, "done" if st["nse_bf2_done"] else "through %s" % cur.isoformat())
         return new
 
     def nse_register(self):
@@ -937,6 +973,8 @@ class Tracker:
                         self.next_slow = time.time() + int(self.cfg.get("slow_poll_minutes", 15)) * 60
                     if not self.state.get("backfill_done"):
                         new += self._guard("bse_backfill", self.bse_backfill_step) or []
+                    if not self.state.get("nse_bf2_done"):
+                        new += self._guard("nse_backfill", self.nse_backfill_step) or []
                     new += self.fast_cycle()
                 self._on_new(new)
                 self.cycle += 1
@@ -1013,7 +1051,7 @@ class Tracker:
         today = now_ist().date()
         out = []
         with self.lock:
-            m, decl = self.state["meetings"], self.state["declared"]
+            m, decl, decks = self.state["meetings"], self.state["declared"], self.state.get("decks") or {}
             for isin in self.tracked():
                 c = self.dir.get(isin) or {}
                 if not c:
@@ -1031,6 +1069,7 @@ class Tracker:
                              "nse_ts": d.get("nse_ts"), "bse_ts": d.get("bse_ts"), "detail": d.get("detail"),
                              "headline": d.get("headline")} if d else None,
                     "ltp": p[0], "chg": p[1],
+                    "deck": decks.get(isin),
                 })
         return out
 
@@ -1148,7 +1187,7 @@ class Tracker:
         w = csv.writer(buf)
         w.writerow(["Company", "NSE", "BSE", "ISIN", "Groups", "Industry", "Mcap Rs cr", "Status", "Board meeting",
                     "Prev meeting", "Meeting src", "Declared (IST)", "Declared src", "Detail", "LTP", "% chg",
-                    "NSE filing", "BSE filing"])
+                    "Results (NSE)", "Results (BSE)", "Investor presentation"])
         rank = {"DECLARED": 0, "AWAITED": 1, "UPCOMING": 2, "OVERDUE": 3, "UNSCHEDULED": 4}
         for r in sorted(self.rows(), key=lambda r: (rank[r["status"]], -(r["mcap"] or 0))):
             m, d = r["meet"] or {}, r["decl"] or {}
@@ -1156,7 +1195,7 @@ class Tracker:
                         r["mcap"] or "", r["status"], m.get("date") or "", m.get("prev") or "", m.get("src") or "",
                         (d.get("ts") or "")[:19].replace("T", " "), d.get("src") or "", d.get("detail") or "",
                         r["ltp"] if r["ltp"] is not None else "", r["chg"] if r["chg"] is not None else "",
-                        d.get("nse") or "", d.get("bse") or ""])
+                        d.get("nse") or "", d.get("bse") or "", (r["deck"] or {}).get("link") or ""])
         return buf.getvalue()
 
     # ---- one-shot snapshot (GitHub Actions -> Pages)
@@ -1197,7 +1236,7 @@ class Tracker:
             st["last_slow"] = now_ist().isoformat(timespec="seconds")
         if not self.no_bse and not st.get("backfill_done"):
             new += self._guard("bse_backfill", self.bse_backfill_step) or []
-        if self.no_bse and not st.get("nse_backfill_done"):
+        if not st.get("nse_bf2_done"):
             new += self._guard("nse_backfill", self.nse_backfill_step) or []
         new += self.fast_cycle()
         self._on_new(new)
@@ -1297,10 +1336,13 @@ class Tracker:
     def _demo_declare(self, st, isin, ts, rnd):
         both = rnd.random() < 0.8
         src = rnd.choice(["NSE", "BSE"])
-        merge_declaration(st["declared"], isin, ts, src, "https://www.nseindia.com/" if src == "NSE" else
-                          "https://www.bseindia.com/", "Unaudited financial results for the quarter ended "
+        merge_declaration(st["declared"], isin, ts, src, "https://nsearchives.nseindia.com/demo_results.pdf"
+                          if src == "NSE" else "https://www.bseindia.com/demo_results.pdf", "Unaudited financial results for the quarter ended "
                           + self.q["qend"].strftime("%d %b %Y"), "%s · Consolidated · Un-Audited" % self.q["qname"],
                           seen=ts)
+        if rnd.random() < 0.7:
+            merge_deck(st["decks"], isin, ts + timedelta(minutes=rnd.randint(5, 40)), "NSE",
+                       "https://nsearchives.nseindia.com/demo_presentation.pdf", "Investor Presentation")
         if both:
             other = "BSE" if src == "NSE" else "NSE"
             merge_declaration(st["declared"], isin, ts + timedelta(minutes=rnd.randint(1, 6)), other,

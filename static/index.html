@@ -103,6 +103,7 @@ td .sub{color:var(--dim);font:11px var(--mono)}
 .st-UNSCHEDULED{background:rgba(142,160,196,.12);color:var(--muted)}
 s{color:var(--dim)}
 .src{color:var(--dim);font:10px var(--mono);margin-left:4px}
+.lk{display:inline-block;min-width:44px;color:var(--dim);font-size:11px}
 .up{color:var(--green)} .dn{color:var(--red)}
 .empty{padding:28px;text-align:center;color:var(--dim)}
 tr.flash td{animation:flash 2.4s ease-out 2}
@@ -387,11 +388,18 @@ function cellDecl(r) {
     (r.decl.detail ? '<div class="sub" style="font-family:var(--sans)">' + esc(r.decl.detail) + "</div>" : "");
 }
 function cellLinks(r) {
-  if (!r.decl) return "";
-  var a = [];
-  if (r.decl.nse) a.push('<a href="' + esc(r.decl.nse) + '" target="_blank" rel="noopener">NSE ↗</a>');
-  if (r.decl.bse) a.push('<a href="' + esc(r.decl.bse) + '" target="_blank" rel="noopener">BSE ↗</a>');
-  return a.join(" &nbsp;");
+  // Links go straight to the exchange PDF in a new tab (no referrer, which both exchanges accept).
+  var A = function (href, label, title) { return '<a href="' + esc(href) + '" target="_blank" rel="noopener noreferrer" title="' + esc(title) + '">' + label + "</a>"; };
+  var pdf = function (u) { return /\.pdf($|\?)/i.test(u || ""); };
+  var out = [];
+  if (r.decl) {
+    var a = [];
+    if (r.decl.nse) a.push(A(r.decl.nse, pdf(r.decl.nse) ? "NSE ↗" : "NSE XBRL ↗", "Results filing on NSE"));
+    if (r.decl.bse) a.push(A(r.decl.bse, "BSE ↗", "Results filing on BSE"));
+    if (a.length) out.push('<span class="lk">Results</span> ' + a.join(" "));
+  }
+  if (r.deck) out.push('<span class="lk">Deck</span> ' + A(r.deck.link, "PDF ↗", "Investor presentation · " + r.deck.src + " · " + fmtTs(r.deck.ts) + (r.deck.title ? "\n" + r.deck.title : "")));
+  return out.join("<br>");
 }
 
 function renderTable(rows) {
@@ -470,7 +478,7 @@ function renderSide() {
     return '<div class="fi"><div class="r1"><b title="' + esc(e.headline) + '">' + esc(e.name) + (isNew ? '<span class="new">NEW</span>' : "") + '</b><span class="tm">' + fmtTs(e.ts) + "</span></div>" +
       '<div class="r2">' + esc([e.nse, e.bse].filter(Boolean).join(" · ")) + " · " + esc(e.src) + " " +
       e.groups.filter(function (g) { return g !== "N500"; }).map(function (g) { return '<span class="tag t-' + g + '">' + (g === "WATCH" ? "W" : g) + "</span>"; }).join("") +
-      (e.link ? ' <a href="' + esc(e.link) + '" target="_blank" rel="noopener">↗</a>' : "") + "</div></div>";
+      (e.link ? ' <a href="' + esc(e.link) + '" target="_blank" rel="noopener noreferrer">↗</a>' : "") + "</div></div>";
   }).join("") : '<div class="empty">No declarations yet.</div>';
 }
 
