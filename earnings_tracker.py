@@ -436,9 +436,10 @@ def cached_today(path) -> bool:
 # ---------------------------------------------------------------- tracker
 
 class Tracker:
-    def __init__(self, cfg: dict, demo: bool = False):
+    def __init__(self, cfg: dict, demo: bool = False, no_bse: bool = False):
         self.cfg = cfg
         self.demo = demo
+        self.no_bse = no_bse   # GitHub's runners get HTTP 403 from BSE, so the hosted build skips it
         pre = "demo_" if demo else ""
         self.state_path = os.path.join(DATA, pre + "state.json")
         self.watch_path = os.path.join(BASE, pre + "watchlist.json")
@@ -464,6 +465,7 @@ class Tracker:
         self.q = quarter_info(now_ist().date(), cfg.get("quarter_end_override", ""))
         self.watch = load_json(self.watch_path, {"items": []})
         self.state = self._load_state()
+        self.health = dict(self.state.pop("health", None) or {})
         if demo:
             self._demo_init()
 
@@ -595,7 +597,8 @@ class Tracker:
                     pass
                 code2[code] = isin
             self._ok("bse_scrip_master", len(rows), how)
-        self._guard("bse_scrip_master", bse_scrips)
+        if not self.no_bse:
+            self._guard("bse_scrip_master", bse_scrips)
 
         def indices():
             notes = []
@@ -737,6 +740,28 @@ class Tracker:
         self._ok("bse_backfill", rows_n, "done" if st["backfill_done"] else "through %s" % cur.isoformat())
         return new
 
+    def nse_backfill_step(self, max_days=7):
+        """NSE-only builds lack BSE's early timestamps, so walk the season's NSE announcements once."""
+        st = self.state
+        today = now_ist().date()
+        cur = date.fromisoformat(st["nse_backfill_cursor"]) if st.get("nse_backfill_cursor") else self.q["season_start"]
+        new, n = [], 0
+        for _ in range(max_days):
+            if cur >= today:   # today itself is covered by the fast loop
+                break
+            d = cur.strftime("%d-%m-%Y")
+            items = self.nse.api("/api/corporate-announcements", {"index": "equities", "from_date": d, "to_date": d},
+                                 timeout=60)
+            n += len(items or [])
+            with self.lock:
+                new += self._register_nse(items or [], "nse_backfill")
+                cur += timedelta(days=1)
+                st["nse_backfill_cursor"] = cur.isoformat()
+        with self.lock:
+            st["nse_backfill_done"] = cur >= today
+        self._ok("nse_backfill", n, "done" if st["nse_backfill_done"] else "through %s" % cur.isoformat())
+        return new
+
     def nse_register(self):
         """NSE results register. The legacy /api/corporates-financial-results only returns
         Dec-2024 rows, so this uses the Integrated Filing (Financials) register instead."""
@@ -834,6 +859,9 @@ class Tracker:
                 if isin:
                     self.prices[isin] = [r.get("lastPrice"), r.get("pChange")]
                     n += 1
+                    c = self.dir.get(isin)
+                    if c is not None and r.get("ffmc") and (self.no_bse or not c.get("mcap")):
+                        c["mcap"] = round(float(r["ffmc"]) / 1e7, 1)   # free-float, rupees -> crore
         self._ok("nse_prices", n, j.get("timestamp") or "")
 
     def watch_quotes(self):
@@ -871,13 +899,15 @@ class Tracker:
         log("slow cycle")
         self.load_masters()
         self._guard("nse_board_meetings", self.nse_board_meetings)
-        self._guard("bse_calendar", self.bse_calendar)
+        if not self.no_bse:
+            self._guard("bse_calendar", self.bse_calendar)
         return self._guard("nse_results_register", self.nse_register) or []
 
     def fast_cycle(self):
         new = []
         new += self._guard("nse_announcements", self.nse_announcements_today) or []
-        new += self._guard("bse_announcements", self.bse_today) or []
+        if not self.no_bse:
+            new += self._guard("bse_announcements", self.bse_today) or []
         self._guard("nse_prices", self.nifty500_prices)
         if self.cycle % 5 == 0 and self.watch_isins() - self.n500:
             self._guard("nse_watch_quotes", self.watch_quotes)
@@ -1016,6 +1046,8 @@ class Tracker:
                     "demo": self.demo, "alert_groups": self.cfg.get("alert_groups") or [],
                     "fast_interval": self.fast_interval(), "backfill_done": self.state.get("backfill_done"),
                     "universe": len(self.n500), "watch": len(self.watch_isins()),
+                    "no_bse": self.no_bse, "static": False,
+                    "mcap_basis": "free-float" if self.no_bse else "full",
                 },
                 "health": self.health,
                 "rows": rows,
@@ -1126,6 +1158,73 @@ class Tracker:
                         r["ltp"] if r["ltp"] is not None else "", r["chg"] if r["chg"] is not None else "",
                         d.get("nse") or "", d.get("bse") or ""])
         return buf.getvalue()
+
+    # ---- one-shot snapshot (GitHub Actions -> Pages)
+    def load_hosted_watchlist(self, path):
+        """hosted_watchlist.txt: one symbol / BSE code / ISIN / name per line, # for comments."""
+        items = []
+        try:
+            with open(path, encoding="utf-8") as f:
+                lines = [ln.split("#")[0].strip() for ln in f]
+        except OSError:
+            lines = []
+        for ln in filter(None, lines):
+            isin = self.resolve(ln)
+            if not isin:
+                log("hosted watchlist: cannot resolve", ln)
+                continue
+            c = self.dir.get(isin, {})
+            items.append({"isin": isin, "name": c.get("name"), "nse": c.get("nse"), "bse": c.get("bse")})
+        self.watch = {"items": items}
+
+    def run_once(self, watch_file=None):
+        self.check_quarter()
+        st = self.state
+        self.cycle = int(st.get("cycles", 0))
+        last_slow = from_iso(st.get("last_slow"))
+        slow_due = not last_slow or now_ist() - last_slow > timedelta(
+            minutes=int(self.cfg.get("slow_poll_minutes", 15)))
+        self.load_masters()
+        if watch_file:
+            self.load_hosted_watchlist(watch_file)
+        new = []
+        if slow_due:
+            log("slow cycle")
+            self._guard("nse_board_meetings", self.nse_board_meetings)
+            if not self.no_bse:
+                self._guard("bse_calendar", self.bse_calendar)
+            new += self._guard("nse_results_register", self.nse_register) or []
+            st["last_slow"] = now_ist().isoformat(timespec="seconds")
+        if not self.no_bse and not st.get("backfill_done"):
+            new += self._guard("bse_backfill", self.bse_backfill_step) or []
+        if self.no_bse and not st.get("nse_backfill_done"):
+            new += self._guard("nse_backfill", self.nse_backfill_step) or []
+        new += self.fast_cycle()
+        self._on_new(new)
+        st["cycles"] = self.cycle + 1
+        self.cycle += 1
+        self.last_cycle = now_ist().isoformat(timespec="seconds")
+        # stand-in for the scheduler's cadence so the page can say roughly when to expect data
+        self.next_fast = time.time() + 10 * 60
+        st["health"] = self.health
+        self.save_state()
+        st.pop("health", None)
+        log("snapshot: %s" % self.counts_line())
+
+    def write_site(self, out):
+        os.makedirs(out, exist_ok=True)
+        snap = self.snapshot()
+        snap["meta"]["static"] = True
+        with open(os.path.join(out, "state.json"), "w", encoding="utf-8") as f:
+            json.dump(snap, f, ensure_ascii=False, separators=(",", ":"))
+        with open(os.path.join(out, "export.csv"), "w", encoding="utf-8") as f:
+            f.write("\ufeff" + self.export_csv())
+        with open(os.path.join(STATIC, "index.html"), encoding="utf-8") as f:
+            html = f.read()
+        html = html.replace("<script>\n(function () {", "<script>window.ET_STATIC = true;</script>\n<script>\n(function () {", 1)
+        with open(os.path.join(out, "index.html"), "w", encoding="utf-8") as f:
+            f.write(html)
+        open(os.path.join(out, ".nojekyll"), "w").close()
 
     # ---- demo
     def _demo_init(self):
@@ -1350,10 +1449,18 @@ def main(argv=None):
     ap.add_argument("--demo", action="store_true", help="synthetic data, no network")
     ap.add_argument("--port", type=int, default=None)
     ap.add_argument("--no-browser", action="store_true")
+    ap.add_argument("--snapshot", metavar="DIR", help="run one cycle and write a static site to DIR, then exit")
+    ap.add_argument("--no-bse", action="store_true", help="skip BSE sources (they block cloud servers)")
+    ap.add_argument("--watch-file", help="watchlist text file for --snapshot")
     args = ap.parse_args(argv)
     if not args.demo and requests is None:
         sys.exit("The 'requests' package is required: python3 -m pip install --user requests")
     cfg = load_config()
+    if args.snapshot:
+        tr = Tracker(cfg, no_bse=args.no_bse)
+        tr.run_once(args.watch_file)
+        tr.write_site(args.snapshot)
+        return
     port = args.port or int(cfg.get("port", 8765))
     tr = Tracker(cfg, demo=args.demo)
     srv = ThreadingHTTPServer(("127.0.0.1", port), make_handler(tr))

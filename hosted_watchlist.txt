@@ -1,0 +1,3 @@
+# Watchlist for the hosted (GitHub Pages) dashboard.
+# One company per line: NSE symbol, BSE code, ISIN or name. Lines starting with # are ignored.
+# Edit this file on GitHub (pencil icon) and commit. The page updates within a few minutes.

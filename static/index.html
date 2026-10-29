@@ -172,9 +172,10 @@ aside{display:flex;flex-direction:column;gap:12px;min-width:0}
   <div class="logo"><div class="mark">Aα</div><div class="brand"><b>Earnings Tracker</b><span>Alphapeak Investments</span></div></div>
   <span class="qtag" id="qtag">—</span>
   <span class="demo" id="demotag" hidden>DEMO</span>
+  <span class="qtag" id="nsetag" hidden title="Hosted copy: BSE blocks cloud servers, so this view uses NSE data only">NSE only</span>
   <div class="chips" id="chips"></div>
   <div class="hright">
-    <span class="clock">next pull <b id="cd">—</b></span>
+    <span class="clock"><span id="cdl">next pull</span> <b id="cd">—</b></span>
     <span class="clock"><b id="clock">—</b> IST</span>
     <button class="btn" id="alertsBtn" title="Browser notification + chime for alert groups">Alerts off</button>
     <button class="btn" id="refreshBtn">Refresh</button>
@@ -234,7 +235,7 @@ var GLABEL = {N500:"Nifty 500",N100:"Nifty 100",MID150:"Midcap 150",SML250:"Smal
 var TABS = [["today","Today"],["declared","Declared"],["upcoming","Upcoming"],["unscheduled","Not scheduled"],["overdue","Overdue"],["calendar","Calendar"],["watch","Watchlist"]];
 var SRC = {nse_announcements:"NSE ann",nse_results_register:"NSE reg",nse_board_meetings:"NSE BM",nse_prices:"NSE px",
   nse_watch_quotes:"NSE quotes",nse_index_lists:"NSE idx",nse_equity_master:"NSE EQ",bse_announcements:"BSE ann",
-  bse_backfill:"BSE backfill",bse_calendar:"BSE cal",bse_scrip_master:"BSE scrips",email:"Email",poller:"Poller"};
+  bse_backfill:"BSE backfill",nse_backfill:"NSE backfill",bse_calendar:"BSE cal",bse_scrip_master:"BSE scrips",email:"Email",poller:"Poller"};
 var COLS = [
   ["name","Company",""],["groups","Groups",""],["ind","Industry",""],["mcap","Mcap ₹cr","r"],["meet","Board meet",""],
   ["decl","Declared",""],["ltp","LTP","r"],["chg","% chg","r"],["links","Filings",""]
@@ -247,6 +248,7 @@ try { var saved = JSON.parse(localStorage.getItem("et_ui") || "{}"); for (var k 
 function persist() { try { localStorage.setItem("et_ui", JSON.stringify(ui)); } catch (e) {} }
 
 var S = null, known = null, flashSet = {}, lastOk = 0;
+var STATIC = !!window.ET_STATIC;   // GitHub Pages copy: state.json written by the scheduled workflow
 
 // ---------- UTC-based day maths (IST browser safe)
 function dnum(s) { var p = s.split("-"); return Date.UTC(+p[0], +p[1] - 1, +p[2]) / 864e5; }
@@ -316,6 +318,7 @@ function sortRows(rows) {
 function renderHeader() {
   $("qtag").textContent = S.meta.quarter + " · season from " + fmtDay(S.meta.season_start);
   $("demotag").hidden = !S.meta.demo;
+  $("nsetag").hidden = !S.meta.no_bse;
   var h = S.health, keys = Object.keys(h).sort();
   $("chips").innerHTML = keys.map(function (k) {
     var x = h[k];
@@ -358,10 +361,11 @@ function renderTabs(rows) {
   }).join("");
   var note = "";
   if (ui.tab === "overdue") note = "Meeting date has passed but no results filing was matched on NSE or BSE. Verify on the exchange sites: the meeting may have been postponed, adjourned, or the filing worded unusually.";
+  if (ui.tab === "watch" && STATIC) note = "Hosted view: this watchlist comes from hosted_watchlist.txt in the GitHub repo. Edit that file to change it.";
   if (ui.tab === "today" && S.meta.demo) note = "Demo mode: synthetic companies; a new declaration is simulated every ~15s.";
   $("tabnote").innerHTML = note ? '<div class="note">' + esc(note) + "</div>" : "";
   $("calwrap").hidden = ui.tab !== "calendar";
-  $("wlwrap").hidden = ui.tab !== "watch";
+  $("wlwrap").hidden = ui.tab !== "watch" || STATIC;
 }
 
 function cellCompany(r) {
@@ -392,7 +396,8 @@ function cellLinks(r) {
 
 function renderTable(rows) {
   var s = ui.sorts[ui.tab] || DEFAULT_SORT[ui.tab];
-  var cols = COLS.slice(); if (ui.tab === "watch") cols.push(["rm", "", ""]);
+  var cols = COLS.slice(); if (ui.tab === "watch" && !STATIC) cols.push(["rm", "", ""]);
+  if (S.meta.mcap_basis === "free-float") cols[3] = ["mcap", "FF Mcap ₹cr", "r"];
   $("thead").innerHTML = "<tr>" + cols.map(function (c) {
     var cls = [c[2]]; if (c[0] === s[0]) { cls.push("s"); if (s[1] > 0) cls.push("asc"); }
     return '<th class="' + cls.join(" ") + '" data-k="' + c[0] + '">' + c[1] + "</th>";
@@ -415,7 +420,7 @@ function renderTable(rows) {
       '<td class="r num">' + inr(r.ltp, 2) + "</td>" +
       '<td class="r num ' + (r.chg > 0 ? "up" : r.chg < 0 ? "dn" : "") + '">' + chg + "</td>" +
       "<td>" + cellLinks(r) + "</td>" +
-      (ui.tab === "watch" ? '<td><button class="rm" data-rm="' + r.isin + '" title="Remove from watchlist">✕</button></td>' : "") +
+      (ui.tab === "watch" && !STATIC ? '<td><button class="rm" data-rm="' + r.isin + '" title="Remove from watchlist">✕</button></td>' : "") +
       "</tr>";
   }).join("");
 }
@@ -529,14 +534,18 @@ function notify(r) {
 
 // ---------- data
 function load() {
-  return fetch("/api/state", {cache: "no-store"}).then(function (r) { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); })
+  return fetch(STATIC ? "state.json?t=" + Date.now() : "/api/state", {cache: "no-store"}).then(function (r) { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); })
     .then(function (j) { S = j; lastOk = Date.now(); $("err").style.display = "none"; diffDeclared(); render(); })
-    .catch(function (e) { $("err").style.display = "block"; $("err").textContent = "Cannot reach the tracker server (" + e.message + "). Is it still running?"; });
+    .catch(function (e) { $("err").style.display = "block"; $("err").textContent = STATIC ? "Cannot load the latest data (" + e.message + "). Retrying…" : "Cannot reach the tracker server (" + e.message + "). Is it still running?"; });
 }
 function tick() {
   var now = new Date();
   $("clock").textContent = now.toLocaleTimeString("en-GB", {timeZone: "Asia/Kolkata", hour12: false});
-  if (S && S.meta.next_fast) {
+  if (S && STATIC && S.meta.last_cycle) {
+    var ago = Math.max(0, Math.round((Date.now() - Date.parse(S.meta.last_cycle)) / 60000));
+    $("cdl").textContent = "updated";
+    $("cd").textContent = S.meta.last_cycle.slice(11, 16) + (ago ? " · " + ago + "m ago" : " · now");
+  } else if (S && S.meta.next_fast) {
     var s = Math.max(0, Math.round((S.meta.next_fast - Date.now()) / 1000));
     $("cd").textContent = s >= 60 ? Math.floor(s / 60) + "m " + pad(s % 60) + "s" : s + "s";
   }
@@ -627,8 +636,9 @@ $("wlq").addEventListener("keydown", function (e) {
   } else if (e.key === "Escape") hideSugg();
 });
 
+if (STATIC) { $("refreshBtn").hidden = true; $("csvBtn").href = "export.csv"; }
 load();
-setInterval(load, 15000);
+setInterval(load, STATIC ? 60000 : 15000);
 setInterval(tick, 1000); tick();
 setInterval(function () { if (S) renderSide(); }, 60000);
 })();
