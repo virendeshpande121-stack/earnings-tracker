@@ -1,0 +1,10 @@
+# Personal settings (may hold the Gmail app password) and runtime state
+config.json
+watchlist.json
+demo_watchlist.json
+data/*
+!data/samples/
+__pycache__/
+*.pyc
+.DS_Store
+*.tmp
