@@ -94,7 +94,7 @@ td .sub{color:var(--dim);font:11px var(--mono)}
 .t-SML250{color:#b7a1ff;border-color:#4a3f78}
 .t-WATCH{color:#000;background:var(--gold);border-color:var(--gold)}
 .t-N500{display:none}
-.ind{color:var(--muted);max-width:170px;overflow:hidden;text-overflow:ellipsis}
+.ind{color:var(--muted);max-width:140px;overflow:hidden;text-overflow:ellipsis}
 .st{display:inline-block;font:600 10px var(--mono);padding:1px 5px;border-radius:3px}
 .st-DECLARED{background:rgba(46,204,113,.14);color:var(--green)}
 .st-AWAITED{background:rgba(245,166,35,.15);color:var(--amber)}
@@ -239,7 +239,7 @@ var SRC = {nse_announcements:"NSE ann",nse_results_register:"NSE reg",nse_board_
   bse_backfill:"BSE backfill",nse_backfill:"NSE backfill",bse_calendar:"BSE cal",bse_scrip_master:"BSE scrips",email:"Email",poller:"Poller"};
 var COLS = [
   ["name","Company",""],["groups","Groups",""],["ind","Industry",""],["mcap","Mcap ₹cr","r"],["meet","Board meet",""],
-  ["decl","Declared",""],["ltp","LTP","r"],["chg","% chg","r"],["links","Filings",""]
+  ["decl","Declared",""],["links","Filings",""],["ltp","LTP","r"],["chg","% chg","r"]
 ];
 var DEFAULT_SORT = {today:["decl",-1],declared:["decl",-1],upcoming:["meet",1],unscheduled:["mcap",-1],overdue:["meet",-1],calendar:["decl",-1],watch:["decl",-1]};
 
@@ -425,9 +425,9 @@ function renderTable(rows) {
       '<td class="r num">' + inr(r.mcap) + "</td>" +
       "<td>" + cellMeet(r) + "</td>" +
       "<td>" + cellDecl(r) + "</td>" +
+      "<td>" + cellLinks(r) + "</td>" +
       '<td class="r num">' + inr(r.ltp, 2) + "</td>" +
       '<td class="r num ' + (r.chg > 0 ? "up" : r.chg < 0 ? "dn" : "") + '">' + chg + "</td>" +
-      "<td>" + cellLinks(r) + "</td>" +
       (ui.tab === "watch" && !STATIC ? '<td><button class="rm" data-rm="' + r.isin + '" title="Remove from watchlist">✕</button></td>' : "") +
       "</tr>";
   }).join("");
