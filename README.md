@@ -11,6 +11,14 @@ A local dashboard that tracks the status of quarterly results for the Nifty 500 
 - **Run now:** on the repo, go to **Actions → Publish dashboard → Run workflow**.
 - **60-day rule:** GitHub pauses scheduled workflows after 60 days without commits. Re-enable it from the Actions tab.
 
+## Share the live view (Tailscale, read-only)
+1. On this Mac, install Tailscale (Mac App Store or tailscale.com/download) and sign in.
+2. Go to login.tailscale.com, open **Machines**, choose this Mac, then **Share…**. Enter each colleague's email address.
+3. Each colleague installs Tailscale for Windows, signs in with that email and accepts the share.
+4. Double-click **Share Earnings Tracker.command**. It prints the link to send (`http://<mac-name>.<tailnet>.ts.net:8765/`; the Mac's 100.x Tailscale IP also works) and keeps the Mac awake while it runs.
+
+Shared viewers are read-only: they cannot change the watchlist or trigger a refresh. The Mac must stay on, awake and online, and in share mode anyone on the same Wi-Fi can open the page too.
+
 ## Get it on another Mac
 The app runs on each user's own Mac, because it pulls from NSE/BSE directly. GitHub only hosts the code.
 1. On the repo page, click **Code → Download ZIP** and unzip it, or run `git clone https://github.com/virendeshpande121-stack/earnings-tracker.git`.
@@ -56,6 +64,7 @@ Each source shows a chip in the header. Hover over a chip to see its error and t
 ## Files
 | File | Purpose |
 |---|---|
+| `Share Earnings Tracker.command` | Same as the start launcher, but shared read-only over Tailscale/LAN and keeps the Mac awake |
 | `config.json` | Created automatically on first run. Holds the port, intervals, night hours, lookahead, `quarter_end_override` (e.g. `30-Sep-2026`), `alert_groups`, and email settings. |
 | `watchlist.json` | Your watchlist. Add to it from the Watchlist tab, which takes symbols, BSE codes, ISINs, names or `NSE:SYM`. |
 | `data/state.json` | Season state: meetings, declarations, feed and the backfill cursor. It resets automatically when the quarter changes. |

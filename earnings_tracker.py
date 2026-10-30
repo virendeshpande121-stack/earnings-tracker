@@ -1693,6 +1693,10 @@ def make_handler(tr: Tracker):
             self.end_headers()
             self.wfile.write(body)
 
+        def _local(self):
+            # Shared viewers (Tailscale / LAN) get a read-only page; only this Mac can change things.
+            return self.client_address[0] in ("127.0.0.1", "::1", "::ffff:127.0.0.1")
+
         def _body(self):
             n = int(self.headers.get("Content-Length") or 0)
             if not n:
@@ -1710,7 +1714,9 @@ def make_handler(tr: Tracker):
                     with open(os.path.join(STATIC, "index.html"), "rb") as f:
                         return self._send(200, f.read(), "text/html; charset=utf-8")
                 if p == "/api/state":
-                    return self._send(200, tr.snapshot())
+                    snap = tr.snapshot()
+                    snap["meta"]["readonly"] = not self._local()
+                    return self._send(200, snap)
                 if p == "/api/search":
                     return self._send(200, tr.search(parse_qs(u.query).get("q", [""])[0]))
                 if p == "/api/watchlist":
@@ -1728,6 +1734,8 @@ def make_handler(tr: Tracker):
 
         def do_POST(self):
             p = urlparse(self.path).path
+            if not self._local():
+                return self._send(403, {"error": "read-only: changes can only be made on the host Mac"})
             try:
                 b = self._body()
                 if p == "/api/watchlist/add":
@@ -1754,6 +1762,8 @@ def main(argv=None):
     ap.add_argument("--no-browser", action="store_true")
     ap.add_argument("--snapshot", metavar="DIR", help="run one cycle and write a static site to DIR, then exit")
     ap.add_argument("--no-bse", action="store_true", help="skip BSE sources (they block cloud servers)")
+    ap.add_argument("--share", action="store_true",
+                    help="also serve other devices (Tailscale/LAN) read-only, not just this Mac")
     ap.add_argument("--watch-file", help="watchlist text file for --snapshot")
     args = ap.parse_args(argv)
     if not args.demo and requests is None:
@@ -1766,12 +1776,16 @@ def main(argv=None):
         return
     port = args.port or int(cfg.get("port", 8765))
     tr = Tracker(cfg, demo=args.demo)
-    srv = ThreadingHTTPServer(("127.0.0.1", port), make_handler(tr))
+    share = args.share or bool(cfg.get("share"))
+    srv = ThreadingHTTPServer(("0.0.0.0" if share else "127.0.0.1", port), make_handler(tr))
     threading.Thread(target=tr.run, name="poller", daemon=True).start()
     if not args.demo:
         threading.Thread(target=tr.enrich_loop, name="enrich", daemon=True).start()
     url = "http://127.0.0.1:%d/" % port
     log("Earnings Tracker %s%s on %s" % (tr.q["label"], " [DEMO]" if args.demo else "", url))
+    if share:
+        log("sharing read-only on port %d: open http://<this Mac's Tailscale name or IP>:%d/ on other devices"
+            % (port, port))
     if not args.no_browser:
         threading.Timer(1.0, lambda: webbrowser.open(url)).start()
     try:

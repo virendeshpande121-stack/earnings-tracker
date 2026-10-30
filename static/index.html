@@ -263,6 +263,7 @@ function persist() { try { localStorage.setItem("et_ui", JSON.stringify(ui)); } 
 
 var S = null, known = null, flashSet = {}, lastOk = 0;
 var STATIC = !!window.ET_STATIC;   // GitHub Pages copy: state.json written by the scheduled workflow
+function locked() { return STATIC || !!(S && S.meta.readonly); }   // hosted copy or a shared (read-only) viewer
 
 // ---------- UTC-based day maths (IST browser safe)
 function dnum(s) { var p = s.split("-"); return Date.UTC(+p[0], +p[1] - 1, +p[2]) / 864e5; }
@@ -379,10 +380,11 @@ function renderTabs(rows) {
   var note = "";
   if (ui.tab === "overdue") note = "Meeting date has passed but no results filing was matched on NSE or BSE. Verify on the exchange sites: the meeting may have been postponed, adjourned, or the filing worded unusually.";
   if (ui.tab === "watch" && STATIC) note = "Hosted view: this watchlist comes from hosted_watchlist.txt in the GitHub repo. Edit that file to change it.";
+  else if (ui.tab === "watch" && locked()) note = "Shared view: the watchlist can only be changed on the host Mac.";
   if (ui.tab === "today" && S.meta.demo) note = "Demo mode: synthetic companies; a new declaration is simulated every ~15s.";
   $("tabnote").innerHTML = note ? '<div class="note">' + esc(note) + "</div>" : "";
   $("calwrap").hidden = ui.tab !== "calendar";
-  $("wlwrap").hidden = ui.tab !== "watch" || STATIC;
+  $("wlwrap").hidden = ui.tab !== "watch" || locked();
 }
 
 function cellCompany(r) {
@@ -467,7 +469,7 @@ function cellMgmt(r) {
 
 function renderTable(rows) {
   var s = ui.sorts[ui.tab] || DEFAULT_SORT[ui.tab];
-  var cols = COLS.slice(); if (ui.tab === "watch" && !STATIC) cols.push(["rm", "", ""]);
+  var cols = COLS.slice(); if (ui.tab === "watch" && !locked()) cols.push(["rm", "", ""]);
   if (S.meta.mcap_basis === "free-float") cols[3] = ["mcap", "FF Mcap ₹cr", "r"];
   $("thead").innerHTML = "<tr>" + cols.map(function (c) {
     var cls = [c[2]]; if (c[0] === s[0]) { cls.push("s"); if (s[1] > 0) cls.push("asc"); }
@@ -494,7 +496,7 @@ function renderTable(rows) {
       "<td>" + cellCall(r) + "</td>" +
       "<td>" + cellFin(r) + "</td>" +
       '<td class="mg">' + cellMgmt(r) + "</td>" +
-      (ui.tab === "watch" && !STATIC ? '<td><button class="rm" data-rm="' + r.isin + '" title="Remove from watchlist">✕</button></td>' : "") +
+      (ui.tab === "watch" && !locked() ? '<td><button class="rm" data-rm="' + r.isin + '" title="Remove from watchlist">✕</button></td>' : "") +
       "</tr>";
   }).join("");
 }
@@ -609,8 +611,8 @@ function notify(r) {
 // ---------- data
 function load() {
   return fetch(STATIC ? "state.json?t=" + Date.now() : "/api/state", {cache: "no-store"}).then(function (r) { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); })
-    .then(function (j) { S = j; lastOk = Date.now(); $("err").style.display = "none"; diffDeclared(); render(); })
-    .catch(function (e) { $("err").style.display = "block"; $("err").textContent = STATIC ? "Cannot load the latest data (" + e.message + "). Retrying…" : "Cannot reach the tracker server (" + e.message + "). Is it still running?"; });
+    .then(function (j) { S = j; lastOk = Date.now(); $("err").style.display = "none"; if (S.meta.readonly) $("refreshBtn").hidden = true; diffDeclared(); render(); })
+    .catch(function (e) { $("err").style.display = "block"; $("err").textContent = STATIC ? "Cannot load the latest data (" + e.message + "). Retrying…" : "Cannot reach the tracker server (" + e.message + "). Is it still running? On a shared link, the host Mac may be asleep or offline."; });
 }
 function tick() {
   var now = new Date();
