@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
   push:
     branches: [main]
-    paths: ["earnings_tracker.py", "static/**", "hosted_watchlist.txt", ".github/workflows/publish.yml"]
+    paths: ["earnings_tracker.py", "enrich.py", "static/**", "hosted_watchlist.txt", ".github/workflows/publish.yml"]
 
 permissions:
   contents: read
@@ -21,7 +21,7 @@ concurrency:
 jobs:
   publish:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
     environment:
       name: github-pages
       url: ${{ steps.deploy.outputs.page_url }}
@@ -30,7 +30,11 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - run: pip install -r requirements.txt
+      - run: |
+          pip install -r requirements.txt
+          if [ -n "$ANTHROPIC_API_KEY" ]; then pip install anthropic; fi
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
       - name: Restore season state and daily masters
         uses: actions/cache/restore@v4
         with:
@@ -40,6 +44,8 @@ jobs:
           key: season-${{ github.run_id }}
           restore-keys: season-
       - name: Run one cycle
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}   # optional: Claude-written deck pointers
         run: python earnings_tracker.py --snapshot _site --no-bse --watch-file hosted_watchlist.txt
       - name: Save season state
         if: always()

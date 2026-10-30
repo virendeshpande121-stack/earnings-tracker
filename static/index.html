@@ -86,7 +86,10 @@ th.s::after{content:" ▾";color:var(--gold)}
 th.s.asc::after{content:" ▴"}
 td{padding:5px 8px;border-bottom:1px solid var(--line);vertical-align:top;white-space:nowrap}
 tr:hover td{background:rgba(255,255,255,.02)}
-td .nm{font-weight:500;max-width:260px;overflow:hidden;text-overflow:ellipsis}
+td .nm{font-weight:500;max-width:200px;overflow:hidden;text-overflow:ellipsis}
+/* keep the company in view while the wide results columns scroll */
+#tbody>tr>td:first-child{position:sticky;left:0;z-index:1;background:var(--panel)}
+#thead th:first-child{left:0;z-index:3}
 td .sub{color:var(--dim);font:11px var(--mono)}
 .tag{display:inline-block;padding:0 5px;margin-right:3px;border-radius:3px;font:600 10px var(--mono);border:1px solid}
 .t-N100{color:var(--gold);border-color:#6b5a22}
@@ -94,7 +97,7 @@ td .sub{color:var(--dim);font:11px var(--mono)}
 .t-SML250{color:#b7a1ff;border-color:#4a3f78}
 .t-WATCH{color:#000;background:var(--gold);border-color:var(--gold)}
 .t-N500{display:none}
-.ind{color:var(--muted);max-width:140px;overflow:hidden;text-overflow:ellipsis}
+.ind{color:var(--muted);max-width:110px;overflow:hidden;text-overflow:ellipsis}
 .st{display:inline-block;font:600 10px var(--mono);padding:1px 5px;border-radius:3px}
 .st-DECLARED{background:rgba(46,204,113,.14);color:var(--green)}
 .st-AWAITED{background:rgba(245,166,35,.15);color:var(--amber)}
@@ -104,6 +107,15 @@ td .sub{color:var(--dim);font:11px var(--mono)}
 s{color:var(--dim)}
 .src{color:var(--dim);font:10px var(--mono);margin-left:4px}
 .lk{display:inline-block;min-width:44px;color:var(--dim);font-size:11px}
+.fin{border-collapse:collapse;font:11px/1.3 var(--mono)}
+.fin td{padding:0 0 0 8px;border:0;text-align:right}
+.fin td:first-child{padding-left:0;text-align:left;color:var(--muted);font-family:var(--sans)}
+.fin tr.h td{color:var(--dim);font-size:10px}
+.fin tr:hover td{background:none}
+.mg{white-space:normal;min-width:260px;max-width:340px;font-size:12px;line-height:1.35}
+.mg div+div{margin-top:4px}
+.mg b{font:600 10px var(--mono);color:var(--gold);margin-right:4px;text-transform:uppercase}
+.dim{color:var(--dim);font-size:11px}
 .up{color:var(--green)} .dn{color:var(--red)}
 .empty{padding:28px;text-align:center;color:var(--dim)}
 tr.flash td{animation:flash 2.4s ease-out 2}
@@ -236,10 +248,11 @@ var GLABEL = {N500:"Nifty 500",N100:"Nifty 100",MID150:"Midcap 150",SML250:"Smal
 var TABS = [["today","Today"],["declared","Declared"],["upcoming","Upcoming"],["unscheduled","Not scheduled"],["overdue","Overdue"],["calendar","Calendar"],["watch","Watchlist"]];
 var SRC = {nse_announcements:"NSE ann",nse_results_register:"NSE reg",nse_board_meetings:"NSE BM",nse_prices:"NSE px",
   nse_watch_quotes:"NSE quotes",nse_index_lists:"NSE idx",nse_equity_master:"NSE EQ",bse_announcements:"BSE ann",
-  bse_backfill:"BSE backfill",nse_backfill:"NSE backfill",bse_calendar:"BSE cal",bse_scrip_master:"BSE scrips",email:"Email",poller:"Poller"};
+  bse_backfill:"BSE backfill",nse_backfill:"NSE backfill",bse_calendar:"BSE cal",enrich:"Fin/decks",bse_scrip_master:"BSE scrips",email:"Email",poller:"Poller"};
 var COLS = [
-  ["name","Company",""],["groups","Groups",""],["ind","Industry",""],["mcap","Mcap ₹cr","r"],["meet","Board meet",""],
-  ["decl","Declared",""],["links","Filings",""],["ltp","LTP","r"],["chg","% chg","r"]
+  ["name","Company",""],["groups","Groups",""],["ind","Industry",""],["mcap","Mcap ₹cr","r"],["ltp","LTP","r"],["chg","% chg","r"],
+  ["meet","Board meet",""],["decl","Declared",""],["links","Filings",""],["call","Concall",""],
+  ["fin","Results (YoY / QoQ)",""],["mgmt","Management view (deck)",""]
 ];
 var DEFAULT_SORT = {today:["decl",-1],declared:["decl",-1],upcoming:["meet",1],unscheduled:["mcap",-1],overdue:["meet",-1],calendar:["decl",-1],watch:["decl",-1]};
 
@@ -297,6 +310,9 @@ function sortVal(r, k) {
     case "mcap": return r.mcap;
     case "meet": return r.meet ? r.meet.date : null;
     case "decl": return r.decl ? r.decl.ts : null;
+    case "fin": return r.fin && r.fin.yoy ? r.fin.yoy.pat : null;
+    case "call": return r.call ? r.call.date + " " + (r.call.time || "99") : null;
+    case "mgmt": return r.deck && r.deck.points && r.deck.points.length ? 1 : null;
     case "ltp": return r.ltp;
     case "chg": return r.chg;
   }
@@ -385,7 +401,10 @@ function cellDecl(r) {
   if (!r.decl) return '<span style="color:var(--dim)">—</span>';
   var t = "first: " + r.decl.src + (r.decl.nse_ts ? "\nNSE " + r.decl.nse_ts.replace("T", " ").slice(0, 19) : "") + (r.decl.bse_ts ? "\nBSE " + r.decl.bse_ts.replace("T", " ").slice(0, 19) : "") + (r.decl.detail ? "\n" + r.decl.detail : "") + (r.decl.headline ? "\n" + r.decl.headline : "");
   return '<span class="num" title="' + esc(t) + '" style="color:var(--green)">' + fmtTs(r.decl.ts) + '</span><span class="src">' + esc(r.decl.src) + "</span>" +
-    (r.decl.detail ? '<div class="sub" style="font-family:var(--sans)">' + esc(r.decl.detail) + "</div>" : "");
+    (r.decl.detail ? '<div class="sub" style="font-family:var(--sans)">' + esc(shortDetail(r.decl.detail)) + "</div>" : "");
+}
+function shortDetail(d) {   // "Second Quarter · Consolidated · Un-Audited" -> "Consol · Unaudited"
+  return d.replace(/^(First|Second|Third|Fourth) Quarter · /, "").replace("Consolidated", "Consol").replace("Standalone", "Standalone").replace("Un-Audited", "Unaudited");
 }
 function cellLinks(r) {
   // Links go straight to the exchange PDF in a new tab (no referrer, which both exchanges accept).
@@ -400,6 +419,50 @@ function cellLinks(r) {
   }
   if (r.deck) out.push('<span class="lk">Deck</span> ' + A(r.deck.link, "PDF ↗", "Investor presentation · " + r.deck.src + " · " + fmtTs(r.deck.ts) + (r.deck.title ? "\n" + r.deck.title : "")));
   return out.join("<br>");
+}
+
+function pctCell(v, bps) {
+  if (v == null) return '<td class="dim">–</td>';
+  var t = bps ? (v > 0 ? "+" : "") + v + "bp" : (v > 0 ? "+" : "") + Number(v).toFixed(1) + "%";
+  return '<td class="' + (v > 0 ? "up" : v < 0 ? "dn" : "") + '">' + t + "</td>";
+}
+function cellFin(r) {
+  if (!r.decl) return "";
+  var f = r.fin;
+  if (!f) return '<span class="dim">fetching…</span>';
+  if (!f.cur) return '<span class="dim">' + esc(/year-to-date/.test(f.err || "") ? "XBRL has YTD only" : "not in XBRL") + "</span>";
+  var c = f.cur, y = f.yoy || {}, q = f.qoq || {}, k = c.kind;
+  var lab = {rev: k === "bank" ? "NII" : k === "insurer" ? "Gross prem." : "Revenue",
+             ebitda: k === "bank" || k === "lender" ? "PPOP" : "EBITDA"};
+  var rows = [["rev", lab.rev], ["ebitda", lab.ebitda], ["margin", "EBITDA mgn"], ["pbt", "PBT"], ["pat", "PAT"], ["eps", "EPS ₹"]];
+  var h = '<table class="fin"><tr class="h"><td>₹ cr · ' + (f.basis === "Standalone" ? "SA" : "Consol") + "</td><td>" + esc(S.meta.quarter.split(" ")[0]) + "</td><td>YoY</td><td>QoQ</td></tr>";
+  rows.forEach(function (x) {
+    var key = x[0], v = c[key];
+    if (key === "margin") {
+      if (v == null) return;
+      h += "<tr><td>" + x[1] + "</td><td>" + Number(v).toFixed(1) + "%</td>" + pctCell(y.margin_bps, 1) + pctCell(q.margin_bps, 1) + "</tr>";
+      return;
+    }
+    if (v == null && key === "ebitda") return;
+    h += "<tr><td>" + x[1] + "</td><td>" + (v == null ? "–" : inr(v, key === "eps" ? 2 : 0)) + "</td>" + pctCell(y[key]) + pctCell(q[key]) + "</tr>";
+  });
+  return h + "</table>";
+}
+function cellCall(r) {
+  if (!r.decl) return "";
+  var c = r.call;
+  if (!c) return '<span class="dim">—</span>';
+  var A = function (inner) { return c.link ? '<a href="' + esc(c.link) + '" target="_blank" rel="noopener noreferrer" title="Exchange intimation">' + inner + "</a>" : inner; };
+  if (c.time) return A('<span class="num">' + fmtDay(c.date) + " " + c.time + "</span>");
+  return '<span class="num">' + fmtDay(c.date) + '</span> <span class="dim" title="Intimation gave no time; this is when the call recording was posted">' + A("rec. " + esc(c.posted || "")) + "</span>";
+}
+function cellMgmt(r) {
+  var d = r.deck;
+  if (!d) return r.decl ? '<span class="dim">no deck</span>' : "";
+  if (!d.points) return '<span class="dim">reading deck…</span>';
+  if (!d.points.length) return '<span class="dim">' + esc(d.pts_note || "no commentary found") + "</span>";
+  var t = d.pts_src === "claude" ? "Summarised by Claude from the investor presentation" : "Extracted from the investor presentation (auto)";
+  return '<div title="' + t + '">' + d.points.map(function (p) { return "<div><b>" + esc(p.tag) + "</b>" + esc(p.text) + "</div>"; }).join("") + "</div>";
 }
 
 function renderTable(rows) {
@@ -423,11 +486,14 @@ function renderTable(rows) {
       "<td>" + r.groups.map(function (g) { return '<span class="tag t-' + g + '">' + (g === "WATCH" ? "W" : g.replace("SML", "S").replace("MID", "M")) + "</span>"; }).join("") + "</td>" +
       '<td class="ind" title="' + esc(r.ind) + '">' + esc(r.ind || "—") + "</td>" +
       '<td class="r num">' + inr(r.mcap) + "</td>" +
+      '<td class="r num">' + inr(r.ltp, 2) + "</td>" +
+      '<td class="r num ' + (r.chg > 0 ? "up" : r.chg < 0 ? "dn" : "") + '">' + chg + "</td>" +
       "<td>" + cellMeet(r) + "</td>" +
       "<td>" + cellDecl(r) + "</td>" +
       "<td>" + cellLinks(r) + "</td>" +
-      '<td class="r num">' + inr(r.ltp, 2) + "</td>" +
-      '<td class="r num ' + (r.chg > 0 ? "up" : r.chg < 0 ? "dn" : "") + '">' + chg + "</td>" +
+      "<td>" + cellCall(r) + "</td>" +
+      "<td>" + cellFin(r) + "</td>" +
+      '<td class="mg">' + cellMgmt(r) + "</td>" +
       (ui.tab === "watch" && !STATIC ? '<td><button class="rm" data-rm="' + r.isin + '" title="Remove from watchlist">✕</button></td>' : "") +
       "</tr>";
   }).join("");

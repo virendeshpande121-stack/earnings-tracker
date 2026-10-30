@@ -2,7 +2,7 @@
 """Alphapeak Earnings Tracker: live quarterly-results status for Nifty 500 + watchlist.
 
 Runs a background poller against NSE/BSE and serves static/index.html plus a JSON API
-on 127.0.0.1. Python 3.9+, `requests` + stdlib only.
+on 127.0.0.1. Python 3.9+, `requests` + stdlib (plus `pypdf` for deck pointers and concall PDFs).
 """
 from __future__ import annotations
 
@@ -30,6 +30,8 @@ try:
     import requests
 except ImportError:  # demo mode and the unit tests work without it
     requests = None
+
+import enrich
 
 IST = ZoneInfo("Asia/Kolkata")
 BASE = os.path.dirname(os.path.abspath(__file__))
@@ -59,6 +61,8 @@ DEFAULT_CONFIG = {
     "lookahead_days": 45,
     "quarter_end_override": "",
     "alert_groups": ["WATCH", "N100"],
+    "anthropic_api_key": "",   # optional: Claude-written deck pointers (else extractive); env ANTHROPIC_API_KEY also works
+    "snapshot_enrich_seconds": 420,
     "email": {
         "enabled": False,
         "smtp_user": "",
@@ -233,6 +237,27 @@ def is_presentation_bse(item: dict, qend: date) -> bool:
     text = "%s %s" % (item.get("NEWSSUB") or "", item.get("HEADLINE") or "")
     return ("presentation" in text.lower() and not DECK_EXCLUDE.search(text)
             and not wrong_period(text, qend))
+
+
+CALL_DESC = "analysts/institutional investor meet"
+
+
+def add_call(calls: dict, isin: str, ts: datetime, link: str | None, text: str, season_start: date) -> bool:
+    """Record an analyst/concall intimation; the date/time is parsed from its text now, or from
+    the PDF later when the text has none."""
+    lst = calls.setdefault(isin, [])
+    key = link or text
+    if any((c.get("link") or c.get("text")) == key for c in lst):
+        return False
+    low = (text or "").lower()
+    kind = "recording" if enrich.CALL_RECORDING.search(text or "") else "outcome" if "outcome" in low else "schedule"
+    c = {"ts": iso(ts), "link": link, "text": (text or "")[:300], "kind": kind}
+    if kind != "recording":
+        c["slots"] = enrich.call_slots(text, season_start) or None
+        if not link:   # nothing more to read (demo / text-only intimations)
+            c["earn"] = bool(enrich.CALL_EARNINGS.search(text or ""))
+    lst.append(c)
+    return True
 
 
 def merge_deck(decks: dict, isin: str, ts: datetime, src: str, link: str | None, title: str) -> None:
@@ -499,7 +524,8 @@ class Tracker:
     # ---- state
     def _fresh_state(self):
         return {"quarter": self.q["label"], "qend": self.q["qend"].isoformat(), "meetings": {}, "declared": {},
-                "feed": [], "backfill_done": False, "backfill_cursor": None, "decks": {}}
+                "feed": [], "backfill_done": False, "backfill_cursor": None, "decks": {},
+                "filings": {}, "fin": {}, "calls": {}}
 
     def _load_state(self):
         st = load_json(self.state_path, None)
@@ -665,6 +691,13 @@ class Tracker:
         tracked = self.tracked()
         new = []
         for it in items:
+            if (it.get("desc") or "").strip().lower().startswith(CALL_DESC):
+                isin = self.sym2isin.get((it.get("symbol") or "").upper()) or (it.get("sm_isin") or "").strip()
+                ts = nse_ann_time(it)
+                if isin in tracked and ts and ts >= start:
+                    add_call(self.state["calls"], isin, ts, it.get("attchmntFile"), it.get("attchmntText") or "",
+                             self.q["season_start"])
+                continue
             result, deck = classify_nse(it, qend), is_presentation_nse(it, qend)
             if not result and not deck:
                 continue
@@ -780,7 +813,8 @@ class Tracker:
         for NSE-only builds (which lack BSE)."""
         st = self.state
         today = now_ist().date()
-        cur = date.fromisoformat(st["nse_bf2_cursor"]) if st.get("nse_bf2_cursor") else self.q["season_start"]
+        # v3 cursor: re-walk once so concall intimations from earlier in the season are captured too
+        cur = date.fromisoformat(st["nse_bf3_cursor"]) if st.get("nse_bf3_cursor") else self.q["season_start"]
         new, n = [], 0
         for _ in range(max_days):
             if cur >= today:   # today itself is covered by the fast loop
@@ -792,10 +826,10 @@ class Tracker:
             with self.lock:
                 new += self._register_nse(items or [], "nse_backfill")
                 cur += timedelta(days=1)
-                st["nse_bf2_cursor"] = cur.isoformat()
+                st["nse_bf3_cursor"] = cur.isoformat()
         with self.lock:
-            st["nse_bf2_done"] = cur >= today
-        self._ok("nse_backfill", n, "done" if st["nse_bf2_done"] else "through %s" % cur.isoformat())
+            st["nse_bf3_done"] = cur >= today
+        self._ok("nse_backfill", n, "done" if st["nse_bf3_done"] else "through %s" % cur.isoformat())
         return new
 
     def nse_register(self):
@@ -826,6 +860,11 @@ class Tracker:
                 if not isin or isin not in tracked or not ts:
                     continue
                 matched += 1
+                if r.get("xbrl"):
+                    fl = self.state["filings"].setdefault(isin, {})
+                    b = "Consolidated" if "consol" in (r.get("consolidated") or "").lower() else "Standalone"
+                    if not fl.get(b) or iso(ts) > fl[b]["ts"]:
+                        fl[b] = {"xbrl": r["xbrl"], "ts": iso(ts), "seq": r.get("seq_Id")}
                 detail = " · ".join(x for x in (self.q["qname"], r.get("consolidated"), r.get("audited")) if x)
                 link = r.get("pdf_attach") or r.get("ixbrl") or r.get("xbrl")
                 if merge_declaration(self.state["declared"], isin, ts, "NSE", link,
@@ -930,6 +969,177 @@ class Tracker:
             raise RuntimeError("; ".join(errs)[:300])
         self._ok("nse_watch_quotes", n, ("via %s" % self.quote_mode) + (("; failed " + ", ".join(errs)) if errs else ""))
 
+    # ---- enrichment: results snapshot, concall time, deck pointers (slow, so it runs on its own client)
+    def _enc(self):
+        if getattr(self, "nse2", None) is None:
+            self.nse2 = NSEClient()
+        return self.nse2
+
+    def _decl_day(self, isin):
+        d = self.state["declared"].get(isin)
+        t = from_iso(d["ts"]) if d else None
+        return t.astimezone(IST).date() if t else None
+
+    def _pdf(self, url, max_mb):
+        r = self._enc().get(url, timeout=90)
+        data = r.content
+        if len(data) > max_mb * 1024 * 1024:
+            raise RuntimeError("PDF too large (%d MB)" % (len(data) // 1048576))
+        if not data.startswith(b"%PDF"):
+            raise RuntimeError("not a PDF")
+        return data
+
+    def compute_fin(self, isin):
+        with self.lock:
+            fl = dict(self.state["filings"].get(isin) or {})
+            have = self.state["fin"].get(isin) or {}
+        basis = "Consolidated" if "Consolidated" in fl else "Standalone" if "Standalone" in fl else None
+        if not basis:
+            return False
+        cur = fl[basis]
+        if have.get("seq") == cur["seq"] and have.get("basis") == basis:
+            return False
+        c = self.dir.get(isin) or {}
+        lender = (c.get("ind") or "") == "Financial Services"
+        qend = self.q["qend"]
+        nse = self._enc()
+        rec = {"basis": basis, "seq": cur["seq"], "at": now_ist().isoformat(timespec="seconds")}
+        xml = nse.get(cur["xbrl"]).text
+        m = enrich.fin_metrics(enrich.xbrl_facts(xml, enrich.quarter_start(qend), qend), lender)
+        if not m:
+            # some companies tag only year-to-date figures; say so rather than guess the quarter
+            ytd = "<xbrli:endDate>%s</xbrli:endDate>" % qend.isoformat() in xml.replace(" ", "")
+            rec["err"] = "XBRL has year-to-date figures only" if ytd else "no P&L in XBRL"
+        else:
+            rec["cur"] = m
+            hist = nse.api("/api/integrated-filing-results", {
+                "index": "equities", "type": "Integrated Filing- Financials", "period": "Quarterly",
+                "symbol": c.get("nse") or "", "page": 1, "size": 40}, timeout=60).get("data") or []
+            for key, back in (("qoq", 1), ("yoy", 4)):
+                qe = enrich.shift_quarter(qend, back)
+                rows = [r for r in hist if parse_day(r.get("qe_Date")) == qe and r.get("xbrl")
+                        and ("consol" in (r.get("consolidated") or "").lower()) == (basis == "Consolidated")]
+                if not rows:
+                    continue
+                # a revision corrects the original, so prefer it; otherwise the latest filing
+                r = max(rows, key=lambda r: ((r.get("type_Sub") or "") == "Revision",
+                                             iso(parse_nse_dt(r.get("broadcast_Date") or r.get("creation_Date"))) or ""))
+                pm = enrich.fin_metrics(enrich.xbrl_facts(nse.get(r["xbrl"]).text, enrich.quarter_start(qe), qe), lender)
+                rec["prev_" + key] = pm
+                rec[key] = enrich.growth(m, pm)
+        with self.lock:
+            self.state["fin"][isin] = rec
+        return True
+
+    def parse_call_pdfs(self, isin, limit):
+        day = self._decl_day(isin)
+        if not day:
+            return 0
+        with self.lock:
+            todo = [c for c in self.state["calls"].get(isin) or [] if c["kind"] != "recording"
+                    and "earn" not in c and c.get("link")
+                    and day - timedelta(days=25) <= from_iso(c["ts"]).date() <= day + timedelta(days=7)]
+        n = 0
+        for c in sorted(todo, key=lambda c: c["ts"], reverse=True)[:limit]:
+            text = c.get("text") or ""
+            try:
+                text += " " + " ".join(enrich.pdf_pages(self._pdf(c["link"], 8), 4))
+                err = None
+            except Exception as e:
+                err = str(e)[:120]
+            slots = enrich.call_slots(text, self.q["season_start"])
+            with self.lock:
+                c["slots"], c["earn"] = slots, bool(enrich.CALL_EARNINGS.search(text))
+                if err:
+                    c["err"] = err
+            n += 1
+            if slots and enrich.pick_concall(day, [c]):
+                break
+        return n
+
+    def summarize_deck(self, isin):
+        with self.lock:
+            d = dict(self.state["decks"].get(isin) or {})
+        if not d.get("link") or "points" in d:
+            return False
+        c = self.dir.get(isin) or {}
+        pts, src, note = [], "auto", ""
+        try:
+            pages = enrich.pdf_pages(self._pdf(d["link"], 40), 60)
+            key = os.environ.get("ANTHROPIC_API_KEY") or self.cfg.get("anthropic_api_key")
+            if key:
+                try:
+                    pts = enrich.claude_points(key, c.get("name") or isin, self.q["label"], pages) or []
+                    src = "claude" if pts else src
+                except Exception as e:
+                    log("!! claude summary", c.get("nse"), str(e)[:200])
+            if not pts:
+                pts = enrich.deck_points(pages)
+            if not pts:
+                note = "Deck has no extractable text (image slides)"
+        except Exception as e:
+            note = "Could not read deck: %s" % str(e)[:100]
+        with self.lock:
+            cur = self.state["decks"].get(isin)
+            if cur and cur.get("link") == d["link"]:
+                cur.update(points=pts, pts_src=src, pts_note=note)
+        return True
+
+    def enrich_step(self, budget_s):
+        """One pass of slow per-company work within a time budget: concall PDFs (small), then
+        financials, then decks. Newest declarations first so fresh results fill in quickly."""
+        if enrich.pypdf is None:
+            self._fail("enrich", "pypdf not installed: python3 -m pip install --user pypdf")
+        t_end = time.time() + budget_s
+        with self.lock:
+            decl = sorted((i for i in self.state["declared"] if i in self.tracked()),
+                          key=lambda i: self.state["declared"][i]["ts"], reverse=True)
+        done = {"calls": 0, "fin": 0, "decks": 0}
+        errs = []
+        for kind in ("calls", "fin", "decks"):
+            for isin in decl:
+                if time.time() > t_end or self.stop_evt.is_set():
+                    break
+                try:
+                    if kind == "calls" and enrich.pypdf is not None:
+                        done[kind] += self.parse_call_pdfs(isin, 3)
+                    elif kind == "fin":
+                        done[kind] += self.compute_fin(isin)
+                    elif kind == "decks" and enrich.pypdf is not None:
+                        done[kind] += self.summarize_deck(isin)
+                except Exception as e:
+                    errs.append("%s %s: %s" % (kind, (self.dir.get(isin) or {}).get("nse"), str(e)[:80]))
+                    if kind == "fin":
+                        with self.lock:   # do not retry the same filing every pass
+                            seq = ((self.state["filings"].get(isin) or {}).get("Consolidated") or
+                                   (self.state["filings"].get(isin) or {}).get("Standalone") or {}).get("seq")
+                            self.state["fin"][isin] = {"seq": seq, "err": str(e)[:120],
+                                                       "basis": None, "at": now_ist().isoformat(timespec="seconds")}
+        with self.lock:
+            nf = sum(1 for i in decl if (self.state["fin"].get(i) or {}).get("cur"))
+            nd = sum(1 for i in decl if "points" in (self.state["decks"].get(i) or {}))
+            nc = sum(1 for i in decl if self.concall_for(i))
+        if enrich.pypdf is not None:
+            self._ok("enrich", sum(done.values()), "%d/%d financials, %d concall times, %d deck summaries%s" % (
+                nf, len(decl), nc, nd, ("; " + "; ".join(errs[:3])) if errs else ""))
+        return sum(done.values())
+
+    def concall_for(self, isin):
+        day = self._decl_day(isin)
+        calls = self.state["calls"].get(isin)
+        return enrich.pick_concall(day, calls) if day and calls else None
+
+    def enrich_loop(self):
+        while not self.stop_evt.is_set():
+            n = 0
+            try:
+                n = self.enrich_step(120)
+                self.save_state()
+            except Exception as e:
+                traceback.print_exc()
+                self._fail("enrich", e)
+            self.stop_evt.wait(5 if n else 60)
+
     # ---- cycles
     def slow_cycle(self):
         log("slow cycle")
@@ -973,7 +1183,7 @@ class Tracker:
                         self.next_slow = time.time() + int(self.cfg.get("slow_poll_minutes", 15)) * 60
                     if not self.state.get("backfill_done"):
                         new += self._guard("bse_backfill", self.bse_backfill_step) or []
-                    if not self.state.get("nse_bf2_done"):
+                    if not self.state.get("nse_bf3_done"):
                         new += self._guard("nse_backfill", self.nse_backfill_step) or []
                     new += self.fast_cycle()
                 self._on_new(new)
@@ -1052,6 +1262,7 @@ class Tracker:
         out = []
         with self.lock:
             m, decl, decks = self.state["meetings"], self.state["declared"], self.state.get("decks") or {}
+            fins = self.state.get("fin") or {}
             for isin in self.tracked():
                 c = self.dir.get(isin) or {}
                 if not c:
@@ -1070,6 +1281,9 @@ class Tracker:
                              "headline": d.get("headline")} if d else None,
                     "ltp": p[0], "chg": p[1],
                     "deck": decks.get(isin),
+                    "fin": {k: fins[isin].get(k) for k in ("basis", "cur", "qoq", "yoy", "err")}
+                    if d and isin in fins else None,
+                    "call": self.concall_for(isin) if d else None,
                 })
         return out
 
@@ -1187,7 +1401,11 @@ class Tracker:
         w = csv.writer(buf)
         w.writerow(["Company", "NSE", "BSE", "ISIN", "Groups", "Industry", "Mcap Rs cr", "Status", "Board meeting",
                     "Prev meeting", "Meeting src", "Declared (IST)", "Declared src", "Detail", "LTP", "% chg",
-                    "Results (NSE)", "Results (BSE)", "Investor presentation"])
+                    "Results (NSE)", "Results (BSE)", "Investor presentation", "Basis",
+                    "Revenue Rs cr", "Revenue YoY %", "Revenue QoQ %", "EBITDA Rs cr", "EBITDA YoY %", "EBITDA QoQ %",
+                    "EBITDA margin %", "Margin YoY bps", "Margin QoQ bps", "PBT Rs cr", "PBT YoY %", "PBT QoQ %",
+                    "PAT Rs cr", "PAT YoY %", "PAT QoQ %", "EPS Rs", "EPS YoY %", "EPS QoQ %", "Concall",
+                    "Mgmt pointer 1", "Mgmt pointer 2"])
         rank = {"DECLARED": 0, "AWAITED": 1, "UPCOMING": 2, "OVERDUE": 3, "UNSCHEDULED": 4}
         for r in sorted(self.rows(), key=lambda r: (rank[r["status"]], -(r["mcap"] or 0))):
             m, d = r["meet"] or {}, r["decl"] or {}
@@ -1195,7 +1413,9 @@ class Tracker:
                         r["mcap"] or "", r["status"], m.get("date") or "", m.get("prev") or "", m.get("src") or "",
                         (d.get("ts") or "")[:19].replace("T", " "), d.get("src") or "", d.get("detail") or "",
                         r["ltp"] if r["ltp"] is not None else "", r["chg"] if r["chg"] is not None else "",
-                        d.get("nse") or "", d.get("bse") or "", (r["deck"] or {}).get("link") or ""])
+                        d.get("nse") or "", d.get("bse") or "", (r["deck"] or {}).get("link") or ""]
+                       + fin_csv_cells(r["fin"]) + [concall_text(r["call"])]
+                       + [("%s: %s" % (p["tag"], p["text"])) for p in ((r["deck"] or {}).get("points") or [])[:2]])
         return buf.getvalue()
 
     # ---- one-shot snapshot (GitHub Actions -> Pages)
@@ -1236,10 +1456,11 @@ class Tracker:
             st["last_slow"] = now_ist().isoformat(timespec="seconds")
         if not self.no_bse and not st.get("backfill_done"):
             new += self._guard("bse_backfill", self.bse_backfill_step) or []
-        if not st.get("nse_bf2_done"):
+        if not st.get("nse_bf3_done"):
             new += self._guard("nse_backfill", self.nse_backfill_step) or []
         new += self.fast_cycle()
         self._on_new(new)
+        self._guard("enrich", self.enrich_step, int(self.cfg.get("snapshot_enrich_seconds", 420)))
         st["cycles"] = self.cycle + 1
         self.cycle += 1
         self.last_cycle = now_ist().isoformat(timespec="seconds")
@@ -1343,6 +1564,25 @@ class Tracker:
         if rnd.random() < 0.7:
             merge_deck(st["decks"], isin, ts + timedelta(minutes=rnd.randint(5, 40)), "NSE",
                        "https://nsearchives.nseindia.com/demo_presentation.pdf", "Investor Presentation")
+            st["decks"][isin].update(pts_src="auto", pts_note="", points=[
+                {"tag": "Highlights", "text": "Revenue grew %d%% YoY led by volume growth in the core business; "
+                                              "margins expanded on softer input costs." % rnd.randint(4, 25)},
+                {"tag": "Outlook", "text": "Management expects demand momentum to sustain in H2 FY27 and "
+                                           "remains confident of double-digit growth for the year."}])
+        rev = round(rnd.uniform(800, 40000), 2)
+        mg = rnd.uniform(8, 28)
+
+        def g():
+            return round(rnd.uniform(-12, 30), 1)
+        cur = {"kind": "corp", "rev": rev, "ebitda": round(rev * mg / 100, 2), "margin": round(mg, 2),
+               "pbt": round(rev * mg / 140, 2), "pat": round(rev * mg / 190, 2), "eps": round(rnd.uniform(2, 90), 2)}
+        st["fin"][isin] = {"basis": "Consolidated", "seq": "demo", "cur": cur,
+                           "yoy": {"rev": g(), "ebitda": g(), "pbt": g(), "pat": g(), "eps": g(),
+                                   "margin_bps": rnd.randint(-150, 200)},
+                           "qoq": {"rev": g(), "ebitda": g(), "pbt": g(), "pat": g(), "eps": g(),
+                                   "margin_bps": rnd.randint(-150, 200)}}
+        add_call(st["calls"], isin, ts - timedelta(days=3), None, "Earnings call on %s at %s" % (
+            ts.strftime("%d %B %Y"), rnd.choice(["4:00 p.m.", "5:30 p.m.", "11:00 a.m."])), self.q["season_start"])
         if both:
             other = "BSE" if src == "NSE" else "NSE"
             merge_declaration(st["declared"], isin, ts + timedelta(minutes=rnd.randint(1, 6)), other,
@@ -1371,6 +1611,26 @@ class Tracker:
             isin = rnd.choice(pool)
             self._demo_declare(self.state, isin, now_ist(), rnd)
             return [isin]
+
+
+def fin_csv_cells(f):
+    f = f or {}
+    cur, yoy, qoq = f.get("cur") or {}, f.get("yoy") or {}, f.get("qoq") or {}
+    out = [f.get("basis") or ""]
+    for k in ("rev", "ebitda", "margin", "pbt", "pat", "eps"):
+        if k == "margin":
+            out += [cur.get(k, ""), yoy.get("margin_bps", ""), qoq.get("margin_bps", "")]
+        else:
+            out += [cur.get(k, ""), yoy.get(k, ""), qoq.get(k, "")]
+    return ["" if v is None else v for v in out]
+
+
+def concall_text(c):
+    if not c:
+        return ""
+    if c.get("time"):
+        return "%s %s" % (c["date"], c["time"])
+    return "%s (recording posted %s)" % (c["date"], c.get("posted") or "")
 
 
 # ---------------------------------------------------------------- email
@@ -1507,6 +1767,8 @@ def main(argv=None):
     tr = Tracker(cfg, demo=args.demo)
     srv = ThreadingHTTPServer(("127.0.0.1", port), make_handler(tr))
     threading.Thread(target=tr.run, name="poller", daemon=True).start()
+    if not args.demo:
+        threading.Thread(target=tr.enrich_loop, name="enrich", daemon=True).start()
     url = "http://127.0.0.1:%d/" % port
     log("Earnings Tracker %s%s on %s" % (tr.q["label"], " [DEMO]" if args.demo else "", url))
     if not args.no_browser:
