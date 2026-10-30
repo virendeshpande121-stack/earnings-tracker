@@ -1,6 +1,6 @@
 # Alphapeak Earnings Tracker
 
-A local dashboard that tracks the status of quarterly results for the Nifty 500 and your watchlist. It pulls live data from NSE and BSE.
+A local dashboard that tracks the status of quarterly results for the Nifty 500 and your watchlist. It pulls live data from NSE and BSE, and for each declared company shows the quarter's numbers with YoY/QoQ growth, the concall time and two pointers from the investor presentation.
 
 ## Hosted copy (shareable link)
 **https://virendeshpande121-stack.github.io/earnings-tracker/**
@@ -42,6 +42,15 @@ Sources and cadence:
   - NSE results register (Integrated Filing – Financials)
 - **One-time BSE backfill:** walks the season a few days per cycle, so the first full picture takes about 5 to 10 minutes.
 
+## Results snapshot, concall and management view (declared companies)
+| Column | Source | Notes |
+|---|---|---|
+| **Results (YoY / QoQ)** | NSE Integrated Filing XBRL for this quarter, the previous quarter and the year-ago quarter | Consolidated when filed, else standalone (tagged in the cell). EBITDA = PBT before exceptional items + finance costs + D&A − other income; margin is on revenue from operations. Banks show NII and PPOP, NBFCs show PPOP (PBT + impairment), insurers show gross premium. Growth on a loss base is left blank. |
+| **Concall** | NSE "Analysts/Institutional Investor Meet/Con. Call Updates" filings | Date and time read from the intimation text, else its PDF. A slot more than 2 days after the results counts only when the intimation mentions the results. If no time is given, it shows when the call recording was posted ("rec."). |
+| **Management view (deck)** | Investor presentation PDF | Two pointers (Highlights, Outlook) picked from the deck text automatically. With an Anthropic API key (`anthropic_api_key` in `config.json` or `ANTHROPIC_API_KEY`, plus `pip install anthropic`), Claude writes them instead. Image-only decks show a note. |
+
+A background worker fills these in, newest results first, about 30 a minute. The "Fin/decks" chip shows progress. The hosted page fills over its first few runs; to use Claude there, add an `ANTHROPIC_API_KEY` repository secret.
+
 Each source shows a chip in the header. Hover over a chip to see its error and the last time it succeeded. If one source fails, the others keep running.
 
 ## Files
@@ -50,6 +59,7 @@ Each source shows a chip in the header. Hover over a chip to see its error and t
 | `config.json` | Created automatically on first run. Holds the port, intervals, night hours, lookahead, `quarter_end_override` (e.g. `30-Sep-2026`), `alert_groups`, and email settings. |
 | `watchlist.json` | Your watchlist. Add to it from the Watchlist tab, which takes symbols, BSE codes, ISINs, names or `NSE:SYM`. |
 | `data/state.json` | Season state: meetings, declarations, feed and the backfill cursor. It resets automatically when the quarter changes. |
+| `enrich.py` | XBRL, concall and deck parsers |
 | `data/samples/` | Raw endpoint responses used by the tests |
 | `demo_watchlist.json`, `data/demo_state.json` | Used only by `--demo` |
 
