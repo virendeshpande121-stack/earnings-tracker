@@ -305,7 +305,7 @@ _HIGHLIGHT = re.compile(
 _SECTION = re.compile(
     r"outlook|guidance|highlights|executive summary|key messages|management commentary|ceo|md'?s message|"
     r"strategic priorities|way forward|takeaways|performance overview|summary", re.I)
-_SPLIT = re.compile(r"\s*(?:[•▪●❖➢►■◆✓]|\s\d{1,2}[.)]\s(?=[A-Z])|(?<=[a-z%)])\.\s+(?=[A-Z]))\s*")
+_SPLIT = re.compile(r"\s*(?:[─•▪●❖➢►■◆✓]|\s\d{1,2}[.)]\s(?=[A-Z])|(?<=[a-z%)])\.\s+(?=[A-Z]))\s*")
 
 
 def _sentences(page: str) -> list:
@@ -315,7 +315,7 @@ def _sentences(page: str) -> list:
     return [s.strip(" -–|:;") for s in _SPLIT.split(txt) if s and s.strip()]
 
 
-def _clip(s: str, n: int = 230) -> str:
+def _clip(s: str, n: int = 170) -> str:
     s = re.sub(r"\s+", " ", s).strip()
     if len(s) <= n:
         return s.rstrip(".") + "."
@@ -399,6 +399,6 @@ def claude_points(api_key: str, name: str, quarter: str, pages: list, max_chars:
     if not m:
         return None
     pts = json.loads(m.group(0)).get("points") or []
-    pts = [{"tag": str(p.get("tag") or "Highlights")[:20], "text": _clip(str(p.get("text") or ""), 260)}
+    pts = [{"tag": str(p.get("tag") or "Highlights")[:20], "text": _clip(str(p.get("text") or ""), 220)}
            for p in pts if p.get("text")]
     return pts[:2] or None

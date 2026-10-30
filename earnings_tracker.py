@@ -240,6 +240,7 @@ def is_presentation_bse(item: dict, qend: date) -> bool:
 
 
 CALL_DESC = "analysts/institutional investor meet"
+DECK_PTS_VERSION = 2   # bump to re-summarise decks after changing the pointer logic
 
 
 def add_call(calls: dict, isin: str, ts: datetime, link: str | None, text: str, season_start: date) -> bool:
@@ -1060,7 +1061,7 @@ class Tracker:
     def summarize_deck(self, isin):
         with self.lock:
             d = dict(self.state["decks"].get(isin) or {})
-        if not d.get("link") or "points" in d:
+        if not d.get("link") or d.get("pts_v") == DECK_PTS_VERSION:
             return False
         c = self.dir.get(isin) or {}
         pts, src, note = [], "auto", ""
@@ -1082,7 +1083,7 @@ class Tracker:
         with self.lock:
             cur = self.state["decks"].get(isin)
             if cur and cur.get("link") == d["link"]:
-                cur.update(points=pts, pts_src=src, pts_note=note)
+                cur.update(points=pts, pts_src=src, pts_note=note, pts_v=DECK_PTS_VERSION)
         return True
 
     def enrich_step(self, budget_s):
